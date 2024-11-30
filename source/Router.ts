@@ -1,120 +1,96 @@
 import { Data, Error } from "@lucania/toolbox/shared";
-import createExpressEngine, { Request, Response } from "express";
-import { Express as ExpressEngine } from "express-serve-static-core";
+
 import type { Server } from "http";
-import type { HandleFunction } from "./Handler.js";
-import { Handler, Method } from "./Handler.js";
 
-declare module "express-serve-static-core" {
+import type { Express, NextFunction, Request, Response } from "express-serve-static-core";
+import express from "express";
 
-    interface Request {
-        // Added by @lucania/serve. Will contain the IP address of the client making the request.
-        realIp?: string;
-    }
-
+export enum Priority {
+    HIGHEST = -3,
+    HIGHER = -2,
+    HIGH = -1,
+    NORMAL = 0,
+    LOW = 1,
+    LOWER = 2,
+    LOWEST = 3
 }
 
-type IdentifiedHandleFunction = HandleFunction & { engineHandlerFunctionId?: number };
+export enum Subpriority {
+    HIGHEST = -0.03,
+    HIGHER = -0.02,
+    HIGH = -0.01,
+    LOW = 0.01,
+    LOWER = 0.02,
+    LOWEST = 0.03
+}
 
-type Layer = {
-    name: string,
-    regexp: RegExp,
-    handle: IdentifiedHandleFunction;
-    route?: Route;
-    forId?: number
+export type HandlerRegistrationOptions = {
+    priority: number,
+    scope?: string
 };
 
-type Route = {
-    stack: Layer[]
-};
+export type RegistrationCallback = (engine: Express) => void;
+
+type HandlerRegistration = { id: number, priority: number, register: RegistrationCallback };
 
 export class Router {
 
-    private static instance: Router | undefined;
+    private _registrations = new Map<number, HandlerRegistration>;
+    private _scopes = new Map<string, number[]>;
+    private _nextHandlerId = 0;
+    private _engine: Express | undefined = undefined;
+    private _server: Server | undefined = undefined;
 
-    private _engine: ExpressEngine;
-    private _server?: Server;
-    private _engineHandlerFunctionId: number;
-    private _handlerMapping: Record<number, Handler>;
-
-    private constructor() {
-        this._engine = createExpressEngine();
-        this._engineHandlerFunctionId = 1;
-        this._handlerMapping = {};
-        this.setup();
-    }
-
-    public setup() {
-        this._engine.use((request, response, next) => {
-            const xForwardedForHeader = request.headers["x-forwarded-for"];
-            Data.assert(
-                xForwardedForHeader === undefined || typeof xForwardedForHeader === "string",
-                `Received unexpected type for x-forwarded-for header "${typeof xForwardedForHeader}"!`
-            );
-            request.realIp = xForwardedForHeader || request.socket.remoteAddress;
-            if (request.realIp !== undefined) {
-                const [firstIp] = request.realIp.split(',');
-                request.realIp = firstIp.trim();
-            }
-            next();
-        });
-    }
-
-    public registerHandler(handler: Handler) {
-        const register = this._getEngineRegistrationFunction(handler.method);
-        let handleFunction: IdentifiedHandleFunction = async (request, response, next) => {
-            Promise.resolve(handler.handle(request, response, next)).catch((error) => this._handleError(error, request, response));
-        };
-        handleFunction = handleFunction.bind(handler);
-        const id = this._engineHandlerFunctionId++;
-        handleFunction.engineHandlerFunctionId = id;
-        // @ts-ignore
-        handleFunction["injectedName"] = handler.constructor.name;
-        register(handler.path, handleFunction);
-
-        const layer = Router._extractLayer(id, this._engine._router);
-        Data.assert(layer !== undefined, `Failed to find appropriate layer for handler ID ${id}.`);
-        this._handlerMapping[id] = handler;
-        const router: Route = this._engine._router;
-        const length = router.stack.length;
-        for (let i = 0; i <= length; i++) {
-            if (i === length) {
-                router.stack.push(layer);
-                break;
+    public register(options: HandlerRegistrationOptions, register: RegistrationCallback) {
+        const id = this._getNextHandlerId();
+        const handlerRegistration = { id, priority: options.priority, register };
+        this._registrations.set(id, handlerRegistration);
+        if (options.scope !== undefined) {
+            const scopes = this._scopes.get(options.scope);
+            if (scopes === undefined) {
+                this._scopes.set(options.scope, [id]);
             } else {
-                const internalLayer: Layer = router.stack[i];
-                if (typeof internalLayer.forId === "number") {
-                    const registeredHandler = this._handlerMapping[internalLayer.forId];
-                    Data.assert(registeredHandler !== undefined, `Failed to find registered handler for layer (ID "${internalLayer.forId}").`);
-                    if (handler.priority < registeredHandler.priority) {
-                        router.stack.splice(i, 0, layer);
-                        break;
-                    }
-                }
+                scopes.push(id);
             }
         }
-        return handleFunction.engineHandlerFunctionId;
+        return handlerRegistration;
     }
 
-    public registerHandlers(...handlers: Handler[]) {
-        return handlers.map((handler) => this.registerHandler(handler));
+    public unregister(id: number): void;
+    public unregister(scope: string): void;
+    public unregister(idOrScope: number | string) {
+        if (typeof idOrScope === "number") {
+            this._registrations.delete(idOrScope);
+            this._cleanScopes(idOrScope);
+        } else if (typeof idOrScope === "string") {
+            const unregisteredIds = this._scopes.get(idOrScope);
+            if (unregisteredIds !== undefined) {
+                this._scopes.delete(idOrScope);
+                for (const unregisteredId of unregisteredIds) {
+                    this._registrations.delete(unregisteredId);
+                }
+            }
+        } else {
+            throw new Error.Fatal("Invalid parameter.");
+        }
     }
 
-    public unregisterHandler(handlerId: number) {
-        this._removeEngineRoute(handlerId);
-        delete this._handlerMapping[handlerId];
-    }
-
-    public unregisterHandlers(...handlerIds: number[]) {
-        handlerIds.forEach((handlerId) => this.unregisterHandler(handlerId));
+    public update() {
+        this._engine = this._setupAsyncErrorHandling(express());
+        const registrations = [...this._registrations.values()].sort((a, b) => a.priority - b.priority);
+        for (const registration of registrations) {
+            registration.register(this._engine);
+        }
+        return this._engine;
     }
 
     public async start(port: number, host?: string) {
         return new Promise<void>((resolve) => {
+            const engine = this._engine === undefined ? this.update() : this._engine;
             if (host === undefined) {
-                this._server = this._engine.listen(port, resolve);
+                this._server = engine.listen(port, resolve);
             } else {
-                this._server = this._engine.listen(port, host, resolve);
+                this._server = engine.listen(port, host, resolve);
             }
         });
     }
@@ -134,77 +110,48 @@ export class Router {
         return this._engine;
     }
 
-    private _handleError(error: any, request: Request, response: Response) {
-        console.error(error);
-        if (error instanceof Error.Original) {
-            response.end(error.message);
-        } else {
-            response.end("Unknown error");
-        }
-    }
-
-    private _getEngineRegistrationFunction(method: Method) {
-        switch (method) {
-            case Method.GET: return this._engine.get.bind(this._engine);
-            case Method.HEAD: return this._engine.head.bind(this._engine);
-            case Method.POST: return this._engine.post.bind(this._engine);
-            case Method.PUT: return this._engine.put.bind(this._engine);
-            case Method.DELETE: return this._engine.delete.bind(this._engine);
-            case Method.CONNECT: return this._engine.connect.bind(this._engine);
-            case Method.OPTIONS: return this._engine.options.bind(this._engine);
-            case Method.TRACE: return this._engine.trace.bind(this._engine);
-            case Method.PATCH: return this._engine.patch.bind(this._engine);
-            case Method.ALL: return this._engine.all.bind(this._engine);
-            case Method.MIDDLEWARE: return this._engine.use.bind(this._engine);
-        }
-    }
-
-    /**
-     * Custom handle functions are inserted into the express application's layer stack within a "bound dispatch" layer that contains
-     * bindings for path names. This bound dispatch layer must be found in order to insert and extract handlers dynamically.
-     * 
-     * @note express app.use handlers are NOT created within a "bound dispatch" layer.
-     */
-    private static _extractLayer(id: number, route: Route): Layer | undefined {
-        let extractedLayer = undefined;
-        for (let i = 0; i < route.stack.length; i++) {
-            const layer = route.stack[i];
-            if (id === layer.handle.engineHandlerFunctionId) {
-                [extractedLayer] = route.stack.splice(i, 1);
-            } else if (layer.route !== undefined && layer.route.stack.length === 1) {
-                const [nestedLayer] = layer.route.stack;
-                if (nestedLayer.handle.engineHandlerFunctionId === id) {
-                    [extractedLayer] = route.stack.splice(i, 1);
+    private _setupAsyncErrorHandling(engine: Express) {
+        const functionNames: (keyof Express)[] = ["get", "head", "post", "put", "delete", "all", "use"];
+        for (const functionName of functionNames) {
+            const method = engine[functionName];
+            if (typeof method === "function") {
+                engine[functionName] = function (...parameters: any[]) {
+                    const newParameters = parameters.map((parameter) => {
+                        if (typeof parameter === "function") {
+                            return parameter.length === 4 ? (
+                                (error: any, request: Request, response: Response, next: NextFunction) => {
+                                    return Promise.resolve(parameter(error, request, response, next)).catch(next);
+                                }
+                            ) : (
+                                (request: Request, response: Response, next: NextFunction) => {
+                                    return Promise.resolve(parameter(request, response, next)).catch(next);
+                                }
+                            );
+                        }
+                        return parameter;
+                    });
+                    return method.call(this, ...newParameters);
                 }
             }
         }
-        if (extractedLayer !== undefined) {
-            extractedLayer.forId = id;
-        }
-        return extractedLayer;
+        return engine;
     }
 
-    private _removeEngineRoute(id: number, route: Route = this._engine._router) {
-        Router._extractLayer(id, route);
-        return false;
-    }
-
-    public static getInstance(): Router {
-        if (Router.instance === undefined) {
-            Router.instance = new Router();
-        }
-        return Router.instance;
-    }
-
-    public static debugPrint(route: Route, depth: number = 0) {
-        const prefix = "----".repeat(++depth);
-        console.debug(`${prefix} ROUTE (${route.stack.length})`);
-        for (const layer of route.stack) {
-            console.debug(`${prefix}: LAYER (name: ${layer.name}, forId: ${layer.forId})`, layer.regexp);
-            console.debug(`${prefix}:`, layer.handle);
-            if (layer.route !== undefined) {
-                Router.debugPrint(layer.route, depth);
+    private _cleanScopes(invalidatedId: number) {
+        for (const scope in this._scopes.keys()) {
+            const ids = this._scopes.get(scope);
+            Data.assert(ids !== undefined);
+            const newIds = ids.filter((id) => id !== invalidatedId);
+            if (newIds.length <= 0) {
+                this._scopes.delete(scope);
+            } else {
+                this._scopes.set(scope, newIds);
             }
         }
     }
+
+    private _getNextHandlerId() {
+        return this._nextHandlerId++;
+    }
+
 }
