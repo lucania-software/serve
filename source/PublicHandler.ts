@@ -1,10 +1,11 @@
 import express from "express";
-import { Handler, Method } from "./Handler";
+import { ExpressMiddleware } from "./ExpressMiddleware";
+import { Priority, Subpriority } from "./Handler";
 
-export class PublicHandler extends Handler {
+export class PublicHandler extends ExpressMiddleware {
 
-    public constructor(publicDirectory: string) {
-        super({ method: Method.GET, path: "*", handle: express.static(publicDirectory) });
+    public constructor(publicDirectory: string, priority: number = Priority.NORMAL + Subpriority.HIGHEST) {
+        super("*", express.static(publicDirectory), priority);
     }
 
 }

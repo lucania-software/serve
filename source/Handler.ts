@@ -1,5 +1,6 @@
 import { Data } from "@lucania/toolbox/shared";
-import type { Query, NextFunction, Request, Response, RouteParameters } from "express-serve-static-core";
+import type { NextFunction, Request, Response } from "express";
+import type { Query, RouteParameters } from "express-serve-static-core";
 
 export enum Method {
 
@@ -11,18 +12,29 @@ export enum Method {
     CONNECT,
     OPTIONS,
     TRACE,
-    PATCH
+    PATCH,
+    ALL,
+    MIDDLEWARE
 
 }
 
 export enum Priority {
-
     HIGHEST = 1,
+    HIGHER = 2,
     HIGH = 3,
-    NORMAL = 5,
-    LOW = 7,
-    LOWEST = 10
+    NORMAL = 4,
+    LOW = 5,
+    LOWER = 6,
+    LOWEST = 7
+}
 
+export enum Subpriority {
+    HIGHEST = -0.03,
+    HIGHER = -0.02,
+    HIGH = -0.01,
+    LOW = 0.01,
+    LOWER = 0.02,
+    LOWEST = 0.03
 }
 
 export type HandleFunction<
