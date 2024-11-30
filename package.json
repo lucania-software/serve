@@ -1,6 +1,6 @@
 {
     "name": "@lucania/serve",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "description": "A library for powering web back-ends.",
     "main": "build/index.js",
     "files": [
