@@ -41,14 +41,15 @@ export class Router {
     private _engine: Express | undefined = undefined;
     private _server: Server | undefined = undefined;
 
-    public register(options: HandlerRegistrationOptions, register: RegistrationCallback) {
+    public register(register: RegistrationCallback, options?: HandlerRegistrationOptions) {
+        const { priority, scope } = options === undefined ? { priority: 5, scope: undefined } : options;
         const id = this._getNextHandlerId();
-        const handlerRegistration = { id, priority: options.priority, register };
+        const handlerRegistration = { id, priority, register };
         this._registrations.set(id, handlerRegistration);
-        if (options.scope !== undefined) {
-            const scopes = this._scopes.get(options.scope);
+        if (scope !== undefined) {
+            const scopes = this._scopes.get(scope);
             if (scopes === undefined) {
-                this._scopes.set(options.scope, [id]);
+                this._scopes.set(scope, [id]);
             } else {
                 scopes.push(id);
             }
